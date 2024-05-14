@@ -1364,6 +1364,7 @@ fn generate_union(
     fields: &[schema_capnp::field::Reader],
     is_reader: bool,
     params: &TypeParameterTexts,
+    reexports: String,
 ) -> ::capnp::Result<(
     FormattedText,
     FormattedText,
@@ -1499,6 +1500,7 @@ fn generate_union(
         Line(fmt!(ctx,
             "pub fn which(self) -> ::core::result::Result<{concrete_type}, {capnp}::NotInSchema> {{"
         )),
+        Line(reexports),
         indent(vec![
             Line(format!(
                 "match self.{field_name}.get_data_field::<u16>({doffset}) {{"
@@ -2109,19 +2111,6 @@ fn generate_node(
             }
 
             if discriminant_count > 0 {
-                let (which_enums1, union_getter, typedef, mut default_decls) =
-                    generate_union(ctx, discriminant_offset, &union_fields, true, &params)?;
-                which_enums.push(which_enums1);
-                which_enums.push(typedef);
-                reader_members.push(union_getter);
-
-                private_mod_interior.append(&mut default_decls);
-
-                let (_, union_getter, typedef, _) =
-                    generate_union(ctx, discriminant_offset, &union_fields, false, &params)?;
-                which_enums.push(typedef);
-                builder_members.push(union_getter);
-
                 let mut reexports = String::new();
                 reexports.push_str("pub use self::Which::{");
                 let mut whichs = Vec::new();
@@ -2130,7 +2119,31 @@ fn generate_node(
                 }
                 reexports.push_str(&whichs.join(","));
                 reexports.push_str("};");
-                preamble.push(Line(reexports));
+
+                let (which_enums1, union_getter, typedef, mut default_decls) = generate_union(
+                    ctx,
+                    discriminant_offset,
+                    &union_fields,
+                    true,
+                    &params,
+                    reexports.clone(),
+                )?;
+                which_enums.push(which_enums1);
+                which_enums.push(typedef);
+                reader_members.push(union_getter);
+
+                private_mod_interior.append(&mut default_decls);
+
+                let (_, union_getter, typedef, _) = generate_union(
+                    ctx,
+                    discriminant_offset,
+                    &union_fields,
+                    false,
+                    &params,
+                    reexports,
+                )?;
+                which_enums.push(typedef);
+                builder_members.push(union_getter);
                 preamble.push(BlankLine);
             }
 
