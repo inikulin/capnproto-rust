@@ -1,6 +1,5 @@
-use std::cell::RefCell;
 use std::marker::PhantomData;
-use std::rc::Rc;
+use std::sync::{Arc, RwLock};
 
 use capnp::capability::{FromClientHook, Promise};
 use capnp::private::capability::{ClientHook, RequestHook};
@@ -26,9 +25,8 @@ struct ClientInner<F, C> {
 
 impl<F, C> ClientInner<F, C>
 where
-    F: FnMut() -> capnp::Result<C>,
-    F: 'static,
-    C: FromClientHook,
+    F: FnMut() -> capnp::Result<C> + Send + Sync + 'static,
+    C: FromClientHook + Send + Sync + 'static,
 {
     fn get_current(&mut self) -> Box<dyn ClientHook> {
         if let Some(hook) = self.current.as_ref() {
@@ -45,19 +43,18 @@ where
 }
 
 struct Client<F, C> {
-    inner: Rc<RefCell<ClientInner<F, C>>>,
+    inner: Arc<RwLock<ClientInner<F, C>>>,
 }
 
 impl<F, C> Client<F, C>
 where
-    F: FnMut() -> capnp::Result<C>,
-    F: 'static,
-    C: FromClientHook,
+    F: FnMut() -> capnp::Result<C> + Send + Sync + 'static,
+    C: FromClientHook + Send + Sync + 'static,
     C: 'static,
 {
     pub fn new(connect: F) -> Client<F, C> {
         Client {
-            inner: Rc::new(RefCell::new(ClientInner {
+            inner: Arc::new(RwLock::new(ClientInner {
                 connect,
                 generation: 0,
                 current: None,
@@ -67,17 +64,20 @@ where
     }
 
     pub fn get_current(&self) -> Box<dyn ClientHook> {
-        self.inner.borrow_mut().get_current()
+        self.inner.write().unwrap().get_current()
     }
 
-    fn wrap<T: 'static>(&self, promise: Promise<T, capnp::Error>) -> Promise<T, capnp::Error> {
+    fn wrap<T>(&self, promise: Promise<T, capnp::Error>) -> Promise<T, capnp::Error>
+    where
+        T: Send + Sync + 'static,
+    {
         let c = self.clone();
-        let generation = self.inner.borrow().generation;
+        let generation = self.inner.read().unwrap().generation;
         Promise::from_future(promise.map_err(move |err| {
             if err.kind == capnp::ErrorKind::Disconnected
-                && generation == c.inner.borrow().generation
+                && generation == c.inner.read().unwrap().generation
             {
-                let mut inner = c.inner.borrow_mut();
+                let mut inner = c.inner.write().unwrap();
                 inner.generation = generation + 1;
                 match (inner.connect)() {
                     Ok(hook) => inner.current = Some(hook.into_client_hook()),
@@ -92,15 +92,14 @@ where
 impl<F: 'static, C> SetTarget<C> for Client<F, C>
 where
     F: 'static,
-    C: FromClientHook,
-    C: 'static,
+    C: FromClientHook + Send + Sync + 'static,
 {
     fn add_ref(&self) -> Box<dyn SetTarget<C>> {
         Box::new(self.clone())
     }
 
     fn set_target(&self, target: C) {
-        self.inner.borrow_mut().current = Some(target.into_client_hook());
+        self.inner.write().unwrap().current = Some(target.into_client_hook());
     }
 }
 
@@ -114,10 +113,8 @@ impl<F, C> Clone for Client<F, C> {
 
 impl<F, C> ClientHook for Client<F, C>
 where
-    F: FnMut() -> capnp::Result<C>,
-    F: 'static,
-    C: FromClientHook,
-    C: 'static,
+    F: FnMut() -> capnp::Result<C> + Send + Sync + 'static,
+    C: FromClientHook + Send + Sync + 'static,
 {
     fn add_ref(&self) -> Box<dyn ClientHook> {
         Box::new(self.clone())
@@ -183,10 +180,8 @@ impl<F, C> Request<F, C> {
 
 impl<F, C> RequestHook for Request<F, C>
 where
-    F: FnMut() -> capnp::Result<C>,
-    F: 'static,
-    C: FromClientHook,
-    C: 'static,
+    F: FnMut() -> capnp::Result<C> + Send + Sync + 'static,
+    C: FromClientHook + Send + Sync + 'static,
 {
     fn get(&mut self) -> capnp::any_pointer::Builder<'_> {
         self.inner.get()
@@ -216,10 +211,8 @@ where
 
 pub fn auto_reconnect<F, C>(mut connect: F) -> capnp::Result<(C, Box<dyn SetTarget<C>>)>
 where
-    F: FnMut() -> capnp::Result<C>,
-    F: 'static,
-    C: FromClientHook,
-    C: 'static,
+    F: FnMut() -> capnp::Result<C> + Send + Sync + 'static,
+    C: FromClientHook + Send + Sync + 'static,
 {
     let current = connect()?;
     let c = Client::new(connect);
@@ -230,10 +223,8 @@ where
 
 pub fn lazy_auto_reconnect<F, C>(connect: F) -> (C, Box<dyn SetTarget<C>>)
 where
-    F: FnMut() -> capnp::Result<C>,
-    F: 'static,
-    C: FromClientHook,
-    C: 'static,
+    F: FnMut() -> capnp::Result<C> + Send + Sync + 'static,
+    C: FromClientHook + Send + Sync + 'static,
 {
     let c: Client<F, C> = Client::new(connect);
     let hook: Box<dyn ClientHook> = Box::new(c.clone());

@@ -21,29 +21,30 @@
 
 use futures::{Future, FutureExt};
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, RwLock};
 
 pub fn split<F, T1, T2, E>(
     f: F,
 ) -> (
-    impl Future<Output = Result<T1, E>>,
-    impl Future<Output = Result<T2, E>>,
+    impl Future<Output = Result<T1, E>> + Send + Sync,
+    impl Future<Output = Result<T2, E>> + Send + Sync,
 )
 where
-    F: Future<Output = Result<(T1, T2), E>>,
-    E: Clone,
+    F: Future<Output = Result<(T1, T2), E>> + Send + Sync,
+    E: Clone + Send + Sync,
+    T1: Send + Sync,
+    T2: Send + Sync,
 {
     let shared = f
         .map(|r| {
             let (v1, v2) = r?;
-            Ok(Rc::new(RefCell::new((Some(v1), Some(v2)))))
+            Ok(Arc::new(RwLock::new((Some(v1), Some(v2)))))
         })
         .shared();
     (
         shared
             .clone()
-            .map(|r| Ok::<T1, E>(r?.borrow_mut().0.take().unwrap())),
-        shared.map(|r| Ok::<T2, E>(r?.borrow_mut().1.take().unwrap())),
+            .map(|r| Ok::<T1, E>(r?.write().unwrap().0.take().unwrap())),
+        shared.map(|r| Ok::<T2, E>(r?.write().unwrap().1.take().unwrap())),
     )
 }

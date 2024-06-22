@@ -191,6 +191,15 @@ where
     }
 }
 
+impl<A> AsOutputSegments for ::std::sync::Arc<message::Builder<A>>
+where
+    A: message::Allocator,
+{
+    fn as_output_segments(&self) -> OutputSegments {
+        self.get_segments_for_output()
+    }
+}
+
 /// Writes the provided message to `writer`. Does not call `flush()`.
 pub async fn write_message<W, M>(mut writer: W, message: M) -> Result<()>
 where

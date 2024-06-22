@@ -53,7 +53,13 @@ pub struct Promise<T, E> {
 #[cfg(feature = "alloc")]
 enum PromiseInner<T, E> {
     Immediate(Result<T, E>),
-    Deferred(Pin<alloc::boxed::Box<dyn Future<Output = core::result::Result<T, E>> + 'static>>),
+    Deferred(
+        Pin<
+            alloc::boxed::Box<
+                dyn Future<Output = core::result::Result<T, E>> + Send + Sync + 'static,
+            >,
+        >,
+    ),
     Empty,
 }
 
@@ -77,7 +83,7 @@ impl<T, E> Promise<T, E> {
 
     pub fn from_future<F>(f: F) -> Self
     where
-        F: Future<Output = core::result::Result<T, E>> + 'static,
+        F: Future<Output = core::result::Result<T, E>> + Send + Sync + 'static,
     {
         Self {
             inner: PromiseInner::Deferred(alloc::boxed::Box::pin(f)),
@@ -329,7 +335,7 @@ impl Client {
 
 /// An untyped server.
 #[cfg(feature = "alloc")]
-pub trait Server {
+pub trait Server: Send + Sync {
     fn dispatch_call(
         &mut self,
         interface_id: u64,

@@ -27,6 +27,7 @@ use crate::private::read_limiter::ReadLimiter;
 use crate::private::units::*;
 use crate::OutputSegments;
 use crate::{Error, ErrorKind, Result};
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 pub type SegmentId = u32;
 
@@ -159,7 +160,7 @@ pub trait BuilderArena: ReaderArena {
 /// A wrapper around a memory segment used in building a message.
 struct BuilderSegment {
     /// Pointer to the start of the segment.
-    ptr: *mut u8,
+    ptr: AtomicPtr<u8>,
 
     /// Total number of words the segment could potentially use. That is, all
     /// bytes from `ptr` to `ptr + (capacity * 8)` may be used in the segment.
@@ -262,7 +263,10 @@ where
             // No such borrow will be possible while `self` is still immutably borrowed from this method,
             // so returning this slice is safe.
             let slice = unsafe {
-                slice::from_raw_parts(seg.ptr as *const _, seg.allocated as usize * BYTES_PER_WORD)
+                slice::from_raw_parts(
+                    seg.ptr.load(Ordering::SeqCst) as *const _,
+                    seg.allocated as usize * BYTES_PER_WORD,
+                )
             };
             OutputSegments::SingleSegment([slice])
         } else {
@@ -273,7 +277,7 @@ where
                     // See safety argument in above branch.
                     let slice = unsafe {
                         slice::from_raw_parts(
-                            seg.ptr as *const _,
+                            seg.ptr.load(Ordering::SeqCst) as *const _,
                             seg.allocated as usize * BYTES_PER_WORD,
                         )
                     };
@@ -310,7 +314,7 @@ where
 {
     fn get_segment(&self, id: u32) -> Result<(*const u8, u32)> {
         let seg = &self.inner.segments[id as usize];
-        Ok((seg.ptr, seg.allocated))
+        Ok((seg.ptr.load(Ordering::SeqCst), seg.allocated))
     }
 
     unsafe fn check_offset(
@@ -346,7 +350,7 @@ where
             None => unreachable!(),
         };
         self.segments.push(BuilderSegment {
-            ptr: seg.0,
+            ptr: AtomicPtr::new(seg.0),
             capacity: seg.1,
             allocated: 0,
         });
@@ -388,7 +392,11 @@ where
             #[cfg(feature = "alloc")]
             for seg in &self.segments {
                 unsafe {
-                    a.deallocate_segment(seg.ptr, seg.capacity, seg.allocated);
+                    a.deallocate_segment(
+                        seg.ptr.load(Ordering::SeqCst),
+                        seg.capacity,
+                        seg.allocated,
+                    );
                 }
             }
 
@@ -403,7 +411,7 @@ where
 
     fn get_segment_mut(&mut self, id: u32) -> (*mut u8, u32) {
         let seg = &self.segments[id as usize];
-        (seg.ptr, seg.capacity)
+        (seg.ptr.load(Ordering::SeqCst), seg.capacity)
     }
 }
 

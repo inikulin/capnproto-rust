@@ -22,18 +22,16 @@ use futures::channel::mpsc;
 use futures::stream::FuturesUnordered;
 use futures::{Future, FutureExt, Stream};
 use std::pin::Pin;
+use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
 enum EnqueuedTask<E> {
-    Task(Pin<Box<dyn Future<Output = Result<(), E>>>>),
+    Task(Pin<Box<dyn Future<Output = Result<(), E>> + Send + Sync>>),
     Terminate(Result<(), E>),
 }
 
 enum TaskInProgress<E> {
-    Task(Pin<Box<dyn Future<Output = ()>>>),
+    Task(Pin<Box<dyn Future<Output = ()> + Send + Sync>>),
     Terminate(Option<Result<(), E>>),
 }
 
@@ -62,7 +60,7 @@ impl<E> Future for TaskInProgress<E> {
 pub struct TaskSet<E> {
     enqueued: Option<mpsc::UnboundedReceiver<EnqueuedTask<E>>>,
     in_progress: FuturesUnordered<TaskInProgress<E>>,
-    reaper: Rc<RefCell<Box<dyn TaskReaper<E>>>>,
+    reaper: Arc<RwLock<Box<dyn TaskReaper<E>>>>,
 }
 
 impl<E> TaskSet<E>
@@ -79,7 +77,7 @@ where
         let set = Self {
             enqueued: Some(receiver),
             in_progress: FuturesUnordered::new(),
-            reaper: Rc::new(RefCell::new(reaper)),
+            reaper: Arc::new(RwLock::new(reaper)),
         };
 
         // If the FuturesUnordered ever gets empty, its stream will terminate, which
@@ -104,7 +102,7 @@ where
 {
     pub fn add<F>(&mut self, f: F)
     where
-        F: Future<Output = Result<(), E>> + 'static,
+        F: Future<Output = Result<(), E>> + Send + Sync + 'static,
     {
         let _ = self.sender.unbounded_send(EnqueuedTask::Task(Box::pin(f)));
     }
@@ -114,7 +112,7 @@ where
     }
 }
 
-pub trait TaskReaper<E>
+pub trait TaskReaper<E>: Send + Sync + 'static
 where
     E: 'static,
 {
@@ -148,13 +146,13 @@ where
                         in_progress.push(TaskInProgress::Terminate(Some(r)));
                     }
                     Poll::Ready(Some(EnqueuedTask::Task(f))) => {
-                        let reaper = Rc::downgrade(reaper);
+                        let reaper = Arc::downgrade(reaper);
                         in_progress.push(TaskInProgress::Task(Box::pin(f.map(move |r| {
                             match reaper.upgrade() {
                                 None => (), // TaskSet must have been dropped.
                                 Some(rc_reaper) => match r {
-                                    Ok(()) => rc_reaper.borrow_mut().task_succeeded(),
-                                    Err(e) => rc_reaper.borrow_mut().task_failed(e),
+                                    Ok(()) => rc_reaper.write().unwrap().task_succeeded(),
+                                    Err(e) => rc_reaper.write().unwrap().task_failed(e),
                                 },
                             }
                         }))));

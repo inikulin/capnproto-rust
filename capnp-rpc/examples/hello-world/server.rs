@@ -56,28 +56,22 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .next()
         .expect("could not parse address");
 
-    tokio::task::LocalSet::new()
-        .run_until(async move {
-            let listener = tokio::net::TcpListener::bind(&addr).await?;
-            let hello_world_client: hello_world::Client = capnp_rpc::new_client(HelloWorldImpl);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let hello_world_client: hello_world::Client = capnp_rpc::new_client(HelloWorldImpl);
 
-            loop {
-                let (stream, _) = listener.accept().await?;
-                stream.set_nodelay(true)?;
-                let (reader, writer) =
-                    tokio_util::compat::TokioAsyncReadCompatExt::compat(stream).split();
-                let network = twoparty::VatNetwork::new(
-                    reader,
-                    writer,
-                    rpc_twoparty_capnp::Side::Server,
-                    Default::default(),
-                );
+    loop {
+        let (stream, _) = listener.accept().await?;
+        stream.set_nodelay(true)?;
+        let (reader, writer) = tokio_util::compat::TokioAsyncReadCompatExt::compat(stream).split();
+        let network = twoparty::VatNetwork::new(
+            reader,
+            writer,
+            rpc_twoparty_capnp::Side::Server,
+            Default::default(),
+        );
 
-                let rpc_system =
-                    RpcSystem::new(Box::new(network), Some(hello_world_client.clone().client));
+        let rpc_system = RpcSystem::new(Box::new(network), Some(hello_world_client.clone().client));
 
-                tokio::task::spawn_local(rpc_system);
-            }
-        })
-        .await
+        tokio::spawn(rpc_system);
+    }
 }

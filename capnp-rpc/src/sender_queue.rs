@@ -22,8 +22,7 @@
 use futures::channel::oneshot;
 use futures::{FutureExt, TryFutureExt};
 
-use std::cell::RefCell;
-use std::rc::{Rc, Weak};
+use std::sync::{Arc, RwLock, Weak};
 
 use capnp::capability::Promise;
 use capnp::Error;
@@ -46,7 +45,7 @@ where
     In: 'static,
     Out: 'static,
 {
-    inner: Rc<RefCell<Inner<In, Out>>>,
+    inner: Arc<RwLock<Inner<In, Out>>>,
 }
 
 pub struct Remover<In, Out>
@@ -55,7 +54,7 @@ where
     Out: 'static,
 {
     id: u64,
-    inner: Weak<RefCell<Inner<In, Out>>>,
+    inner: Weak<RwLock<Inner<In, Out>>>,
 }
 
 impl<In, Out> Drop for Remover<In, Out>
@@ -65,7 +64,7 @@ where
 {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.upgrade() {
-            let Inner { ref mut map, .. } = *inner.borrow_mut();
+            let Inner { ref mut map, .. } = *inner.write().unwrap();
             map.remove(&self.id);
         }
     }
@@ -73,12 +72,12 @@ where
 
 impl<In, Out> SenderQueue<In, Out>
 where
-    In: 'static,
-    Out: 'static,
+    In: Send + Sync + 'static,
+    Out: Send + Sync + 'static,
 {
     pub fn new() -> Self {
         Self {
-            inner: Rc::new(RefCell::new(Inner {
+            inner: Arc::new(RwLock::new(Inner {
                 next_id: 0,
                 map: BTreeMap::new(),
             })),
@@ -89,12 +88,12 @@ where
     /// `value` is consumed on the other end of the queue. If the returned promised
     /// is dropped, then `value` is removed from the queue.
     pub fn push(&mut self, value: In) -> Promise<Out, Error> {
-        let weak_inner = Rc::downgrade(&self.inner);
+        let weak_inner = Arc::downgrade(&self.inner);
         let Inner {
             ref mut next_id,
             ref mut map,
             ..
-        } = *self.inner.borrow_mut();
+        } = *self.inner.write().unwrap();
         let (tx, rx) = oneshot::channel();
         map.insert(*next_id, (value, tx));
 
@@ -120,7 +119,7 @@ where
             ref mut next_id,
             ref mut map,
             ..
-        } = *self.inner.borrow_mut();
+        } = *self.inner.write().unwrap();
         let (tx, _rx) = oneshot::channel();
         map.insert(*next_id, (value, tx));
         *next_id += 1;
@@ -131,7 +130,7 @@ where
             ref mut next_id,
             ref mut map,
             ..
-        } = *self.inner.borrow_mut();
+        } = *self.inner.write().unwrap();
         *next_id = 0;
         let map = ::std::mem::take(map);
         Drain {

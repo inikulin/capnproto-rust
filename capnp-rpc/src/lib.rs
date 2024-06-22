@@ -63,9 +63,8 @@ use capnp::private::capability::ClientHook;
 use capnp::Error;
 use futures::channel::oneshot;
 use futures::{Future, FutureExt, TryFutureExt};
-use std::cell::RefCell;
 use std::pin::Pin;
-use std::rc::{Rc, Weak};
+use std::sync::{Arc, RwLock, Weak};
 use std::task::{Context, Poll};
 
 pub use crate::rpc::Disconnector;
@@ -110,7 +109,7 @@ pub mod twoparty;
 
 use capnp::message;
 
-pub trait OutgoingMessage {
+pub trait OutgoingMessage: Send + Sync {
     fn get_body(&mut self) -> ::capnp::Result<::capnp::any_pointer::Builder>;
     fn get_body_as_reader(&self) -> ::capnp::Result<::capnp::any_pointer::Reader>;
 
@@ -119,18 +118,18 @@ pub trait OutgoingMessage {
     fn send(
         self: Box<Self>,
     ) -> (
-        Promise<Rc<message::Builder<message::HeapAllocator>>, Error>,
-        Rc<message::Builder<message::HeapAllocator>>,
+        Promise<Arc<message::Builder<message::HeapAllocator>>, Error>,
+        Arc<message::Builder<message::HeapAllocator>>,
     );
 
     fn take(self: Box<Self>) -> ::capnp::message::Builder<::capnp::message::HeapAllocator>;
 }
 
-pub trait IncomingMessage {
+pub trait IncomingMessage: Send + Sync {
     fn get_body(&self) -> ::capnp::Result<::capnp::any_pointer::Reader>;
 }
 
-pub trait Connection<VatId> {
+pub trait Connection<VatId>: Send + Sync {
     fn get_peer_vat_id(&self) -> VatId;
     fn new_outgoing_message(&mut self, first_segment_word_size: u32) -> Box<dyn OutgoingMessage>;
 
@@ -143,7 +142,7 @@ pub trait Connection<VatId> {
     fn shutdown(&mut self, result: ::capnp::Result<()>) -> Promise<(), Error>;
 }
 
-pub trait VatNetwork<VatId> {
+pub trait VatNetwork<VatId>: Send + Sync {
     /// Returns None if `hostId` refers to the local vat.
     fn connect(&mut self, host_id: VatId) -> Option<Box<dyn Connection<VatId>>>;
 
@@ -178,7 +177,7 @@ where
 
     // XXX To handle three or more party networks, this should be a map from connection pointers
     // to connection states.
-    connection_state: Rc<RefCell<Option<Rc<rpc::ConnectionState<VatId>>>>>,
+    connection_state: Arc<RwLock<Option<Arc<rpc::ConnectionState<VatId>>>>>,
 
     tasks: TaskSet<Error>,
     handle: crate::task_set::TaskSetHandle<Error>,
@@ -217,7 +216,7 @@ impl<VatId> RpcSystem<VatId> {
         let mut result = Self {
             network,
             bootstrap_cap,
-            connection_state: Rc::new(RefCell::new(None)),
+            connection_state: Arc::new(RwLock::new(None)),
 
             tasks,
             handle: handle.clone(),
@@ -262,13 +261,13 @@ impl<VatId> RpcSystem<VatId> {
     // spawning any background tasks onto `handle`. Returns the resulting value
     // held in `connection_state_ref`.
     fn get_connection_state(
-        connection_state_ref: &Rc<RefCell<Option<Rc<rpc::ConnectionState<VatId>>>>>,
+        connection_state_ref: &Arc<RwLock<Option<Arc<rpc::ConnectionState<VatId>>>>>,
         bootstrap_cap: Box<dyn ClientHook>,
         connection: Box<dyn crate::Connection<VatId>>,
         mut handle: crate::task_set::TaskSetHandle<Error>,
-    ) -> Rc<rpc::ConnectionState<VatId>> {
+    ) -> Arc<rpc::ConnectionState<VatId>> {
         // TODO this needs to be updated once we allow more general VatNetworks.
-        let (tasks, result) = match *connection_state_ref.borrow() {
+        let (tasks, result) = match *connection_state_ref.read().unwrap() {
             Some(ref connection_state) => {
                 // return early.
                 return connection_state.clone();
@@ -278,7 +277,7 @@ impl<VatId> RpcSystem<VatId> {
                     oneshot::channel::<Promise<(), Error>>();
                 let connection_state_ref1 = connection_state_ref.clone();
                 handle.add(on_disconnect_promise.then(move |shutdown_promise| {
-                    *connection_state_ref1.borrow_mut() = None;
+                    *connection_state_ref1.write().unwrap() = None;
                     match shutdown_promise {
                         Ok(s) => s,
                         Err(e) => Promise::err(Error::failed(format!("{e}"))),
@@ -287,7 +286,7 @@ impl<VatId> RpcSystem<VatId> {
                 rpc::ConnectionState::new(bootstrap_cap, connection, on_disconnect_fulfiller)
             }
         };
-        *connection_state_ref.borrow_mut() = Some(result.clone());
+        *connection_state_ref.write().unwrap() = Some(result.clone());
         handle.add(tasks);
         result
     }
@@ -327,7 +326,7 @@ pub struct CapabilityServerSet<S, C>
 where
     C: capnp::capability::FromServer<S>,
 {
-    caps: std::collections::HashMap<usize, Weak<RefCell<C::Dispatch>>>,
+    caps: std::collections::HashMap<usize, Weak<RwLock<C::Dispatch>>>,
 }
 
 impl<S, C> Default for CapabilityServerSet<S, C>
@@ -352,15 +351,15 @@ where
     /// Adds a new capability to the set and returns a client backed by it.
     pub fn new_client(&mut self, s: S) -> C {
         let dispatch = <C as capnp::capability::FromServer<S>>::from_server(s);
-        let wrapped = Rc::new(RefCell::new(dispatch));
-        let ptr = wrapped.as_ptr() as usize;
-        self.caps.insert(ptr, Rc::downgrade(&wrapped));
-        capnp::capability::FromClientHook::new(Box::new(local::Client::from_rc(wrapped)))
+        let wrapped = Arc::new(RwLock::new(dispatch));
+        let ptr = Arc::as_ptr(&wrapped) as usize;
+        self.caps.insert(ptr, Arc::downgrade(&wrapped));
+        capnp::capability::FromClientHook::new(Box::new(local::Client::from(wrapped)))
     }
 
     /// Looks up a capability and returns its underlying server object, if found.
     /// Fully resolves the capability before looking it up.
-    pub async fn get_local_server(&self, client: &C) -> Option<Rc<RefCell<C::Dispatch>>>
+    pub async fn get_local_server(&self, client: &C) -> Option<Arc<RwLock<C::Dispatch>>>
     where
         C: capnp::capability::FromClientHook,
     {
@@ -378,7 +377,7 @@ where
     /// to call `get_resolved_cap()` before calling this. The advantage of this method
     /// over `get_local_server()` is that this one is synchronous and borrows `self`
     /// over a shorter span (which can be very important if `self` is inside a `RefCell`).
-    pub fn get_local_server_of_resolved(&self, client: &C) -> Option<Rc<RefCell<C::Dispatch>>>
+    pub fn get_local_server_of_resolved(&self, client: &C) -> Option<Arc<RwLock<C::Dispatch>>>
     where
         C: capnp::capability::FromClientHook,
     {
@@ -399,11 +398,11 @@ where
 pub fn new_promise_client<T, F>(client_promise: F) -> T
 where
     T: ::capnp::capability::FromClientHook,
-    F: ::futures::Future<Output = Result<capnp::capability::Client, Error>>,
+    F: ::futures::Future<Output = Result<capnp::capability::Client, Error>> + Send + Sync,
     F: 'static + Unpin,
 {
     let mut queued_client = crate::queued::Client::new(None);
-    let weak_client = Rc::downgrade(&queued_client.inner);
+    let weak_client = Arc::downgrade(&queued_client.inner);
 
     queued_client.drive(client_promise.then(move |r| {
         if let Some(queued_inner) = weak_client.upgrade() {

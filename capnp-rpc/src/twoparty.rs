@@ -25,9 +25,7 @@ use capnp::capability::Promise;
 use capnp::message::ReaderOptions;
 use futures::channel::oneshot;
 use futures::{AsyncRead, AsyncWrite, FutureExt, TryFutureExt};
-
-use std::cell::RefCell;
-use std::rc::{Rc, Weak};
+use std::sync::{Arc, RwLock, Weak};
 
 pub type VatId = crate::rpc_twoparty_capnp::Side;
 
@@ -49,7 +47,8 @@ impl crate::IncomingMessage for IncomingMessage {
 
 struct OutgoingMessage {
     message: ::capnp::message::Builder<::capnp::message::HeapAllocator>,
-    sender: ::capnp_futures::Sender<Rc<::capnp::message::Builder<::capnp::message::HeapAllocator>>>,
+    sender:
+        ::capnp_futures::Sender<Arc<::capnp::message::Builder<::capnp::message::HeapAllocator>>>,
 }
 
 impl crate::OutgoingMessage for OutgoingMessage {
@@ -64,15 +63,15 @@ impl crate::OutgoingMessage for OutgoingMessage {
     fn send(
         self: Box<Self>,
     ) -> (
-        Promise<Rc<::capnp::message::Builder<::capnp::message::HeapAllocator>>, ::capnp::Error>,
-        Rc<::capnp::message::Builder<::capnp::message::HeapAllocator>>,
+        Promise<Arc<::capnp::message::Builder<::capnp::message::HeapAllocator>>, ::capnp::Error>,
+        Arc<::capnp::message::Builder<::capnp::message::HeapAllocator>>,
     ) {
         let tmp = *self;
         let Self {
             message,
             mut sender,
         } = tmp;
-        let m = Rc::new(message);
+        let m = Arc::new(message);
         (Promise::from_future(sender.send(m.clone())), m)
     }
 
@@ -85,8 +84,9 @@ struct ConnectionInner<T>
 where
     T: AsyncRead + 'static,
 {
-    input_stream: Rc<RefCell<Option<T>>>,
-    sender: ::capnp_futures::Sender<Rc<::capnp::message::Builder<::capnp::message::HeapAllocator>>>,
+    input_stream: Arc<RwLock<Option<T>>>,
+    sender:
+        ::capnp_futures::Sender<Arc<::capnp::message::Builder<::capnp::message::HeapAllocator>>>,
     side: crate::rpc_twoparty_capnp::Side,
     receive_options: ReaderOptions,
     on_disconnect_fulfiller: Option<oneshot::Sender<()>>,
@@ -96,7 +96,7 @@ struct Connection<T>
 where
     T: AsyncRead + 'static,
 {
-    inner: Rc<RefCell<ConnectionInner<T>>>,
+    inner: Arc<RwLock<ConnectionInner<T>>>,
 }
 
 impl<T> Drop for ConnectionInner<T>
@@ -120,15 +120,15 @@ where
     fn new(
         input_stream: T,
         sender: ::capnp_futures::Sender<
-            Rc<::capnp::message::Builder<::capnp::message::HeapAllocator>>,
+            Arc<::capnp::message::Builder<::capnp::message::HeapAllocator>>,
         >,
         side: crate::rpc_twoparty_capnp::Side,
         receive_options: ReaderOptions,
         on_disconnect_fulfiller: oneshot::Sender<()>,
     ) -> Self {
         Self {
-            inner: Rc::new(RefCell::new(ConnectionInner {
-                input_stream: Rc::new(RefCell::new(Some(input_stream))),
+            inner: Arc::new(RwLock::new(ConnectionInner {
+                input_stream: Arc::new(RwLock::new(Some(input_stream))),
                 sender,
                 side,
                 receive_options,
@@ -140,10 +140,10 @@ where
 
 impl<T> crate::Connection<crate::rpc_twoparty_capnp::Side> for Connection<T>
 where
-    T: AsyncRead + Unpin,
+    T: AsyncRead + Send + Sync + Unpin,
 {
     fn get_peer_vat_id(&self) -> crate::rpc_twoparty_capnp::Side {
-        self.inner.borrow().side
+        self.inner.read().unwrap().side
     }
 
     fn new_outgoing_message(
@@ -152,16 +152,16 @@ where
     ) -> Box<dyn crate::OutgoingMessage> {
         Box::new(OutgoingMessage {
             message: ::capnp::message::Builder::new_default(),
-            sender: self.inner.borrow().sender.clone(),
+            sender: self.inner.read().unwrap().sender.clone(),
         })
     }
 
     fn receive_incoming_message(
         &mut self,
     ) -> Promise<Option<Box<dyn crate::IncomingMessage + 'static>>, ::capnp::Error> {
-        let inner = self.inner.borrow_mut();
+        let inner = self.inner.write().unwrap();
 
-        let maybe_input_stream = inner.input_stream.borrow_mut().take();
+        let maybe_input_stream = inner.input_stream.write().unwrap().take();
         let return_it_here = inner.input_stream.clone();
         match maybe_input_stream {
             Some(mut s) => {
@@ -170,7 +170,7 @@ where
                     let maybe_message =
                         ::capnp_futures::serialize::try_read_message(&mut s, receive_options)
                             .await?;
-                    *return_it_here.borrow_mut() = Some(s);
+                    *return_it_here.write().unwrap() = Some(s);
                     Ok(maybe_message.map(|message| {
                         Box::new(IncomingMessage::new(message)) as Box<dyn crate::IncomingMessage>
                     }))
@@ -186,7 +186,7 @@ where
     }
 
     fn shutdown(&mut self, result: ::capnp::Result<()>) -> Promise<(), ::capnp::Error> {
-        Promise::from_future(self.inner.borrow_mut().sender.terminate(result))
+        Promise::from_future(self.inner.write().unwrap().sender.terminate(result))
     }
 }
 
@@ -199,7 +199,7 @@ where
     connection: Option<Connection<T>>,
 
     // connection handle that we will return on connect()
-    weak_connection_inner: Weak<RefCell<ConnectionInner<T>>>,
+    weak_connection_inner: Weak<RwLock<ConnectionInner<T>>>,
 
     execution_driver: futures::future::Shared<Promise<(), ::capnp::Error>>,
     side: crate::rpc_twoparty_capnp::Side,
@@ -225,7 +225,7 @@ where
         receive_options: ReaderOptions,
     ) -> Self
     where
-        U: AsyncWrite + 'static + Unpin,
+        U: AsyncWrite + Send + Sync + Unpin + 'static,
     {
         let (fulfiller, disconnect_promise) = oneshot::channel();
         let disconnect_promise =
@@ -248,7 +248,7 @@ where
         };
 
         let connection = Connection::new(input_stream, sender, side, receive_options, fulfiller);
-        let weak_inner = Rc::downgrade(&connection.inner);
+        let weak_inner = Arc::downgrade(&connection.inner);
         Self {
             connection: Some(connection),
             weak_connection_inner: weak_inner,
@@ -260,7 +260,7 @@ where
 
 impl<T> crate::VatNetwork<VatId> for VatNetwork<T>
 where
-    T: AsyncRead + Unpin,
+    T: AsyncRead + Send + Sync + Unpin,
 {
     fn connect(&mut self, host_id: VatId) -> Option<Box<dyn crate::Connection<VatId>>> {
         if host_id == self.side {
