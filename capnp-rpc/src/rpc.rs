@@ -403,7 +403,7 @@ impl<VatId> ConnectionErrorHandler<VatId> {
 }
 
 impl<VatId> crate::task_set::TaskReaper<capnp::Error> for ConnectionErrorHandler<VatId> {
-    fn task_failed(&mut self, error: ::capnp::Error) {
+    fn task_failed(&self, error: ::capnp::Error) {
         if let Some(state) = self.weak_state.upgrade() {
             state.disconnect(error)
         }

@@ -22,7 +22,7 @@ use futures::channel::mpsc;
 use futures::stream::FuturesUnordered;
 use futures::{Future, FutureExt, Stream};
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 enum EnqueuedTask<E> {
@@ -60,7 +60,7 @@ impl<E> Future for TaskInProgress<E> {
 pub struct TaskSet<E> {
     enqueued: Option<mpsc::UnboundedReceiver<EnqueuedTask<E>>>,
     in_progress: FuturesUnordered<TaskInProgress<E>>,
-    reaper: Arc<RwLock<Box<dyn TaskReaper<E>>>>,
+    reaper: Arc<Box<dyn TaskReaper<E>>>,
 }
 
 impl<E> TaskSet<E>
@@ -77,7 +77,7 @@ where
         let set = Self {
             enqueued: Some(receiver),
             in_progress: FuturesUnordered::new(),
-            reaper: Arc::new(RwLock::new(reaper)),
+            reaper: Arc::new(reaper),
         };
 
         // If the FuturesUnordered ever gets empty, its stream will terminate, which
@@ -116,8 +116,8 @@ pub trait TaskReaper<E>: Send + Sync + 'static
 where
     E: 'static,
 {
-    fn task_succeeded(&mut self) {}
-    fn task_failed(&mut self, error: E);
+    fn task_succeeded(&self) {}
+    fn task_failed(&self, error: E);
 }
 
 impl<E> Future for TaskSet<E>
@@ -151,8 +151,8 @@ where
                             match reaper.upgrade() {
                                 None => (), // TaskSet must have been dropped.
                                 Some(rc_reaper) => match r {
-                                    Ok(()) => rc_reaper.write().unwrap().task_succeeded(),
-                                    Err(e) => rc_reaper.write().unwrap().task_failed(e),
+                                    Ok(()) => rc_reaper.task_succeeded(),
+                                    Err(e) => rc_reaper.task_failed(e),
                                 },
                             }
                         }))));
