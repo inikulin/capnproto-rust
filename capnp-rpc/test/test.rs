@@ -86,7 +86,7 @@ fn disconnector_setup() -> (
     (client_rpc_system, server_rpc_system)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn drop_import_client_after_disconnect() {
     let (mut client_rpc_system, server_rpc_system) = disconnector_setup();
 
@@ -125,7 +125,7 @@ async fn drop_import_client_after_disconnect() {
     drop(client);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn disconnector_disconnects() {
     let (mut client_rpc_system, server_rpc_system) = disconnector_setup();
 
@@ -164,7 +164,7 @@ async fn disconnector_disconnects() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn disconnector_disconnects_2() {
     let (mut client_rpc_system, server_rpc_system) = disconnector_setup();
 
@@ -250,12 +250,12 @@ where
     join_handle.await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn do_nothing() {
     rpc_top_level(|_client| async { Ok(()) }).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn basic_rpc_calls() {
     rpc_top_level(|client| async move {
         let response = client.test_interface_request().send().promise.await?;
@@ -293,7 +293,7 @@ async fn basic_rpc_calls() {
     .await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn basic_pipelining() {
     rpc_top_level(|client| async move {
         let response = client.test_pipeline_request().send().promise.await?;
@@ -345,7 +345,7 @@ async fn basic_pipelining() {
     .await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn pipelining_return_null() {
     rpc_top_level(|client| async move {
         let response = client.test_pipeline_request().send().promise.await?;
@@ -382,7 +382,7 @@ fn null_capability() {
     assert!(root.get_interface_field().is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn release_simple() {
     rpc_top_level(|client| async move {
         let response = client.test_more_stuff_request().send().promise.await?;
@@ -466,7 +466,7 @@ fn release_on_cancel() {
 }
 */
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn promise_resolve() {
     rpc_top_level(|client| async move {
         let response = client.test_more_stuff_request().send().promise.await?;
@@ -509,7 +509,7 @@ async fn promise_resolve() {
     .await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn retain_and_release() {
     rpc_top_level(|client| async move {
         let (fulfiller, promise) = oneshot::channel::<()>();
@@ -613,7 +613,7 @@ async fn retain_and_release() {
     .await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn cancel_releases_params() {
     rpc_top_level(|client| async move {
         let response = client.test_more_stuff_request().send().promise.await?;
@@ -670,7 +670,7 @@ async fn cancel_releases_params() {
     .await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn dont_hold() {
     rpc_top_level(|client| async move {
         let response = client.test_more_stuff_request().send().promise.await?;
@@ -710,7 +710,7 @@ fn get_call_sequence(
     req.send()
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn embargo_success() {
     rpc_top_level(|client| async move {
         let response = client.test_more_stuff_request().send().promise.await?;
@@ -770,7 +770,7 @@ async fn expect_promise_throws<T>(promise: Promise<T, Error>) -> Result<(), Erro
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn embargo_error() {
     rpc_top_level(|client| async move {
         let response = client.test_more_stuff_request().send().promise.await?;
@@ -816,7 +816,7 @@ async fn embargo_error() {
     .await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn echo_destruction() {
     rpc_top_level(|client| async move {
         let response = client.test_more_stuff_request().send().promise.await?;
@@ -850,7 +850,7 @@ async fn echo_destruction() {
     .await
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn local_client_call_not_immediate() {
     let server = crate::impls::TestInterface::new();
     let call_count = server.get_call_count();
@@ -868,7 +868,7 @@ async fn local_client_call_not_immediate() {
     assert_eq!(call_count.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn local_client_send_cap() {
     let server1 = crate::impls::TestMoreStuff::new();
     let server2 = crate::impls::TestInterface::new();
@@ -881,7 +881,7 @@ async fn local_client_send_cap() {
     assert_eq!(response.get().unwrap().get_s().unwrap(), "bar");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn local_client_return_cap() {
     let server = crate::impls::Bootstrap;
     let client: crate::test_capnp::bootstrap::Client = capnp_rpc::new_client(server);
@@ -900,7 +900,7 @@ async fn local_client_return_cap() {
     assert_eq!(response1.get().unwrap().get_x().unwrap(), "foo");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn capability_list() {
     rpc_top_level(|client| async move {
         let response = client.test_more_stuff_request().send().promise.await?;
@@ -930,7 +930,7 @@ async fn capability_list() {
     .await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn capability_server_set() {
     use crate::impls;
     use crate::test_capnp::test_interface;
@@ -998,7 +998,7 @@ async fn capability_server_set() {
     assert!(set1.get_local_server(&error_promise).await.is_none());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn capability_server_set_rpc() {
     rpc_top_level(|client| async move {
         let response1 = client

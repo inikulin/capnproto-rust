@@ -1813,7 +1813,9 @@ where
         question.param_exports = exports;
         question.is_tail_call = is_tail_call;
 
-        let question_id = connection_state.questions.write().unwrap().push(question);
+        let mut questions_lock = connection_state.questions.write().unwrap();
+
+        let question_id = questions_lock.push(question);
         {
             let mut call_builder: call::Builder = get_call(&mut message).unwrap();
             // Finish and send.
@@ -1832,7 +1834,7 @@ where
             fulfiller,
         )));
 
-        match connection_state.questions.write().unwrap().slots[question_id as usize] {
+        match questions_lock.slots[question_id as usize] {
             Some(ref mut q) => {
                 q.self_ref = Some(Arc::downgrade(&question_ref));
             }

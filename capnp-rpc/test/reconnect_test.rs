@@ -161,7 +161,10 @@ where
             let promise1 = Promise::from_future(tokio::spawn(promise1).map(|r| r.unwrap()));
             let promise2 = Promise::from_future(tokio::spawn(promise2).map(|r| r.unwrap()));
 
-            tokio::task::yield_now().await;
+            // NOTE: spin the state machine a bit to ensure resolution of promise1 and promise2
+            for _ in 0..1000 {
+                tokio::task::yield_now().await;
+            }
 
             fulfiller
                 .send(Err(capnp::Error::disconnected("test2 disconnect".into())))
@@ -190,7 +193,10 @@ where
         let promise1 = Promise::from_future(tokio::spawn(promise1).map(|r| r.unwrap()));
         let promise2 = Promise::from_future(tokio::spawn(promise2).map(|r| r.unwrap()));
 
-        tokio::task::yield_now().await;
+        // NOTE: spin the state machine a bit to ensure resolution of promise1 and promise2
+        for _ in 0..1000 {
+            tokio::task::yield_now().await;
+        }
 
         // Now force a reconnect.
         current_server
@@ -236,7 +242,7 @@ where
 }
 
 /// autoReconnect() direct call (exercises newCall() / RequestHook)
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn auto_reconnect_direct_call() {
     do_autoconnect_test(|c| c).await.unwrap();
 }
@@ -270,7 +276,7 @@ impl test_capnp::bootstrap::Server for Bootstrap {
 }
 
 /// autoReconnect() through RPC (exercises call() / CallContextHook)
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn auto_reconnect_rpc_call() {
     let (client_writer, server_reader) = async_byte_channel::channel();
     let (server_writer, client_reader) = async_byte_channel::channel();
@@ -316,7 +322,7 @@ async fn auto_reconnect_rpc_call() {
 }
 
 /// lazyAutoReconnect() initialies lazily
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn lazy_auto_reconnect_test() {
     let connect_count = Arc::new(AtomicUsize::new(0));
     let current_server = Arc::new(RwLock::new(TestInterfaceImpl::new(0)));
