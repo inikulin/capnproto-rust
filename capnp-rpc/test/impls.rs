@@ -30,8 +30,8 @@ use capnp_rpc::pry;
 
 use futures::{FutureExt, TryFutureExt};
 
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 
 pub struct Bootstrap;
 
@@ -117,18 +117,18 @@ impl bootstrap::Server for Bootstrap {
 
 #[derive(Default)]
 pub struct TestInterface {
-    call_count: Rc<Cell<u64>>,
+    call_count: Arc<AtomicU64>,
 }
 
 impl TestInterface {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn get_call_count(&self) -> Rc<Cell<u64>> {
-        self.call_count.clone()
+    pub fn get_call_count(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.call_count)
     }
     fn increment_call_count(&self) {
-        self.call_count.set(self.call_count.get() + 1);
+        self.call_count.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -307,7 +307,7 @@ impl test_call_order::Server for TestCallOrder {
 #[derive(Default)]
 pub struct TestMoreStuff {
     call_count: u32,
-    handle_count: Rc<Cell<i64>>,
+    handle_count: Arc<AtomicI64>,
     client_to_hold: Option<test_interface::Client>,
 }
 
@@ -496,7 +496,9 @@ impl test_more_stuff::Server for TestMoreStuff {
         mut results: test_more_stuff::GetHandleCountResults,
     ) -> Promise<(), Error> {
         self.call_count += 1;
-        results.get().set_count(self.handle_count.get());
+        results
+            .get()
+            .set_count(self.handle_count.load(Ordering::SeqCst));
         Promise::ok(())
     }
 
@@ -534,20 +536,20 @@ impl test_more_stuff::Server for TestMoreStuff {
 }
 
 struct Handle {
-    count: Rc<Cell<i64>>,
+    count: Arc<AtomicI64>,
 }
 
 impl Handle {
-    fn new(count: &Rc<Cell<i64>>) -> Self {
-        let count = count.clone();
-        count.set(count.get() + 1);
+    fn new(count: &Arc<AtomicI64>) -> Self {
+        let count = Arc::clone(&count);
+        count.fetch_add(1, Ordering::SeqCst);
         Self { count }
     }
 }
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        self.count.set(self.count.get() - 1);
+        self.count.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -614,8 +616,8 @@ impl test_capability_server_set::handle::Server for CssHandle {}
 
 #[derive(Default)]
 pub struct TestCapabilityServerSet {
-    set: Rc<
-        RefCell<
+    set: Arc<
+        RwLock<
             capnp_rpc::CapabilityServerSet<CssHandle, test_capability_server_set::handle::Client>,
         >,
     >,
@@ -635,7 +637,7 @@ impl test_capability_server_set::Server for TestCapabilityServerSet {
     ) -> Promise<(), Error> {
         results
             .get()
-            .set_handle(self.set.borrow_mut().new_client(CssHandle::new()));
+            .set_handle(self.set.write().unwrap().new_client(CssHandle::new()));
         Promise::ok(())
     }
 
@@ -644,11 +646,11 @@ impl test_capability_server_set::Server for TestCapabilityServerSet {
         params: test_capability_server_set::CheckHandleParams,
         mut results: test_capability_server_set::CheckHandleResults,
     ) -> Promise<(), Error> {
-        let set = self.set.clone();
+        let set = Arc::clone(&self.set);
         let handle = pry!(pry!(params.get()).get_handle());
         Promise::from_future(async move {
             let resolved = capnp::capability::get_resolved_cap(handle).await;
-            match set.borrow().get_local_server_of_resolved(&resolved) {
+            match set.read().unwrap().get_local_server_of_resolved(&resolved) {
                 None => (),
                 Some(_) => results.get().set_is_ours(true),
             }

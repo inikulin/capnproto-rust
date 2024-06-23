@@ -269,7 +269,7 @@ impl PipelineHook for Pipeline {
     fn add_ref(&self) -> Box<dyn PipelineHook> {
         Box::new(self.clone())
     }
-    
+
     fn get_pipelined_cap(&self, ops: &[PipelineOp]) -> Box<dyn ClientHook> {
         match self.results.get().unwrap().get_pipelined_cap(ops) {
             Ok(v) => v,

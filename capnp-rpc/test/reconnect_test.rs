@@ -1,6 +1,6 @@
-use std::cell::RefCell;
 use std::future::Future;
-use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 
 use capnp::capability::{Promise, Response};
 use capnp::Error;
@@ -25,7 +25,7 @@ struct TestInterfaceInner {
 
 #[derive(Clone)]
 struct TestInterfaceImpl {
-    inner: Rc<RefCell<TestInterfaceInner>>,
+    inner: Arc<RwLock<TestInterfaceInner>>,
 }
 
 impl TestInterfaceImpl {
@@ -36,17 +36,17 @@ impl TestInterfaceImpl {
             block: None,
         };
         TestInterfaceImpl {
-            inner: Rc::new(RefCell::new(inner)),
+            inner: Arc::new(RwLock::new(inner)),
         }
     }
 
     fn set_error(&self, err: capnp::Error) {
-        self.inner.borrow_mut().error = Some(err);
+        self.inner.write().unwrap().error = Some(err);
     }
 
     fn block(&self) -> oneshot::Sender<capnp::Result<()>> {
         let (s, r) = oneshot::channel();
-        self.inner.borrow_mut().block = Some(
+        self.inner.write().unwrap().block = Some(
             Promise::from_future(r.map(|ret| match ret {
                 Ok(Ok(_)) => Ok(()),
                 Ok(Err(err)) => Err(err),
@@ -64,7 +64,7 @@ impl test_interface::Server for TestInterfaceImpl {
         params: test_interface::FooParams,
         mut results: test_interface::FooResults,
     ) -> Promise<(), Error> {
-        if let Some(err) = self.inner.borrow().error.as_ref() {
+        if let Some(err) = self.inner.read().unwrap().error.as_ref() {
             return Promise::err(err.clone());
         }
         let params = pry!(params.get());
@@ -72,13 +72,13 @@ impl test_interface::Server for TestInterfaceImpl {
             "{} {} {}",
             params.get_i(),
             params.get_j(),
-            self.inner.borrow().generation
+            self.inner.read().unwrap().generation
         );
         {
             let mut results = results.get();
             results.set_x(&s[..]);
         }
-        if let Some(fut) = self.inner.borrow().block.as_ref() {
+        if let Some(fut) = self.inner.read().unwrap().block.as_ref() {
             Promise::from_future(fut.clone())
         } else {
             Promise::ok(())
@@ -135,17 +135,14 @@ where
     let spawner = pool.spawner();
 
     let (req3, fulfiller, promise1, promise2, promise4) = {
-        let connect_count = Rc::new(RefCell::new(0));
-        let current_server = Rc::new(RefCell::new(TestInterfaceImpl::new(0)));
+        let connect_count = Arc::new(AtomicUsize::new(0));
+        let current_server = Arc::new(RwLock::new(TestInterfaceImpl::new(0)));
 
         let c_server = current_server.clone();
         let (c, _s) = auto_reconnect(move || {
-            let generation = *connect_count.borrow();
-            {
-                *connect_count.borrow_mut() += 1;
-            }
+            let generation = connect_count.fetch_add(1, Ordering::SeqCst);
             let server = TestInterfaceImpl::new(generation);
-            *c_server.borrow_mut() = server.clone();
+            *c_server.write().unwrap() = server.clone();
             let client: test_interface::Client = new_client(server);
             Ok(client)
         })?;
@@ -154,7 +151,8 @@ where
         assert_eq!(test(pool, &client, 123, true).unwrap(), "123 true 0");
 
         current_server
-            .borrow()
+            .read()
+            .unwrap()
             .set_error(capnp::Error::disconnected("test1 disconnect".into()));
         assert_err!(
             test(pool, &client, 456, true).unwrap_err(),
@@ -167,7 +165,7 @@ where
         {
             // We cause two disconnect promises to be thrown concurrently. This should only cause the
             // reconnector to reconnect once, not twice.
-            let fulfiller = current_server.borrow().block();
+            let fulfiller = current_server.read().unwrap().block();
             let promise1 = test_promise(&client, 32, false);
             let promise2 = test_promise(&client, 43, true);
             let promise1 = Promise::from_future(spawner.spawn_local_with_handle(promise1).unwrap());
@@ -189,7 +187,7 @@ where
         assert_eq!(test(pool, &client, 43, false).unwrap(), "43 false 2");
 
         // Start a couple calls that will block at the server end, plus an unsent request.
-        let fulfiller = current_server.borrow().block();
+        let fulfiller = current_server.read().unwrap().block();
 
         let promise1 = test_promise(&client, 1212, true);
         let promise2 = test_promise(&client, 3434, false);
@@ -202,7 +200,8 @@ where
 
         // Now force a reconnect.
         current_server
-            .borrow()
+            .read()
+            .unwrap()
             .set_error(capnp::Error::disconnected("test3 disconnect".into()));
 
         // Initiate a request that will fail with DISCONNECTED.
@@ -250,15 +249,15 @@ fn auto_reconnect_direct_call() {
 }
 
 #[derive(Clone)]
-struct Bootstrap(Rc<RefCell<Option<test_interface::Client>>>);
+struct Bootstrap(Arc<RwLock<Option<test_interface::Client>>>);
 
 impl Bootstrap {
     fn new() -> Bootstrap {
-        Bootstrap(Rc::new(RefCell::new(None)))
+        Bootstrap(Arc::new(RwLock::new(None)))
     }
 
     fn set_interface(&self, client: test_interface::Client) {
-        *self.0.borrow_mut() = Some(client);
+        *self.0.write().unwrap() = Some(client);
     }
 }
 
@@ -268,7 +267,7 @@ impl test_capnp::bootstrap::Server for Bootstrap {
         _params: test_capnp::bootstrap::TestInterfaceParams,
         mut results: test_capnp::bootstrap::TestInterfaceResults,
     ) -> Promise<(), Error> {
-        if let Some(client) = self.0.borrow_mut().take() {
+        if let Some(client) = self.0.write().unwrap().take() {
             results.get().set_cap(client);
             Promise::ok(())
         } else {
@@ -328,48 +327,43 @@ fn auto_reconnect_rpc_call() {
 fn lazy_auto_reconnect_test() {
     let mut pool = LocalPool::new();
 
-    let connect_count = Rc::new(RefCell::new(0));
-    let current_server = Rc::new(RefCell::new(TestInterfaceImpl::new(0)));
+    let connect_count = Arc::new(AtomicUsize::new(0));
+    let current_server = Arc::new(RwLock::new(TestInterfaceImpl::new(0)));
 
-    let c_server = current_server.clone();
-    let counter = connect_count.clone();
+    let c_server = Arc::clone(&current_server);
+    let counter = Arc::clone(&connect_count);
     let (client, _s) = auto_reconnect(move || {
-        let generation = *counter.borrow();
-        {
-            *counter.borrow_mut() += 1;
-        }
+        let generation = counter.fetch_add(1, Ordering::SeqCst);
         let server = TestInterfaceImpl::new(generation);
-        *c_server.borrow_mut() = server.clone();
+        *c_server.write().unwrap() = server.clone();
         let client: test_interface::Client = new_client(server);
         Ok(client)
     })
     .unwrap();
 
-    assert_eq!(*connect_count.borrow(), 1);
+    assert_eq!(connect_count.load(Ordering::SeqCst), 1);
     assert_eq!(test(&mut pool, &client, 123, true).unwrap(), "123 true 0");
-    assert_eq!(*connect_count.borrow(), 1);
+    assert_eq!(connect_count.load(Ordering::SeqCst), 1);
 
-    let c_server = current_server.clone();
-    let counter = connect_count.clone();
+    let c_server = Arc::clone(&current_server);
+    let counter = Arc::clone(&connect_count);
     let (client, _s) = lazy_auto_reconnect(move || {
-        let generation = *counter.borrow();
-        {
-            *counter.borrow_mut() += 1;
-        }
+        let generation = counter.fetch_add(1, Ordering::SeqCst);
         let server = TestInterfaceImpl::new(generation);
-        *c_server.borrow_mut() = server.clone();
+        *c_server.write().unwrap() = server.clone();
         let client: test_interface::Client = new_client(server);
         Ok(client)
     });
 
-    assert_eq!(*connect_count.borrow(), 1);
+    assert_eq!(connect_count.load(Ordering::SeqCst), 1);
     assert_eq!(test(&mut pool, &client, 123, true).unwrap(), "123 true 1");
-    assert_eq!(*connect_count.borrow(), 2);
+    assert_eq!(connect_count.load(Ordering::SeqCst), 2);
     assert_eq!(test(&mut pool, &client, 234, false).unwrap(), "234 false 1");
-    assert_eq!(*connect_count.borrow(), 2);
+    assert_eq!(connect_count.load(Ordering::SeqCst), 2);
 
     current_server
-        .borrow()
+        .write()
+        .unwrap()
         .set_error(Error::disconnected("test1 disconnect".into()));
     assert_err!(
         test(&mut pool, &client, 345, true).unwrap_err(),
@@ -377,7 +371,7 @@ fn lazy_auto_reconnect_test() {
     );
 
     // lazyAutoReconnect is only lazy on the first request, not on reconnects.
-    assert_eq!(*connect_count.borrow(), 3);
+    assert_eq!(connect_count.load(Ordering::SeqCst), 3);
     assert_eq!(test(&mut pool, &client, 456, false).unwrap(), "456 false 2");
-    assert_eq!(*connect_count.borrow(), 3);
+    assert_eq!(connect_count.load(Ordering::SeqCst), 3);
 }

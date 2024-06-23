@@ -29,6 +29,8 @@ use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
 use futures::channel::oneshot;
 use futures::{Future, FutureExt, TryFutureExt};
 
+use std::sync::atomic::Ordering;
+
 pub mod test_capnp {
     include!(concat!(env!("OUT_DIR"), "/test_capnp.rs"));
 }
@@ -355,7 +357,7 @@ fn basic_pipelining() {
 
         drop(promise); // Just to be annoying, drop the original promise.
 
-        if chained_call_count.get() != 0 {
+        if chained_call_count.load(Ordering::SeqCst) != 0 {
             return Err(Error::failed(
                 "expected chained_call_count to equal 0".to_string(),
             ));
@@ -369,7 +371,7 @@ fn basic_pipelining() {
 
         let response2 = pipeline_promise2.promise.await?;
         crate::test_util::CheckTestMessage::check_test_message(response2.get()?);
-        assert_eq!(chained_call_count.get(), 1);
+        assert_eq!(chained_call_count.load(Ordering::SeqCst), 1);
         Ok(())
     });
 }
@@ -886,7 +888,7 @@ fn echo_destruction() {
 fn local_client_call_not_immediate() {
     let server = crate::impls::TestInterface::new();
     let call_count = server.get_call_count();
-    assert_eq!(call_count.get(), 0);
+    assert_eq!(call_count.load(Ordering::SeqCst), 0);
     let client: crate::test_capnp::test_interface::Client = capnp_rpc::new_client(server);
     let mut req = client.foo_request();
     req.get().set_i(123);
@@ -894,10 +896,10 @@ fn local_client_call_not_immediate() {
     let remote_promise = req.send();
 
     // Hm... do we actually care about this?
-    assert_eq!(call_count.get(), 0);
+    assert_eq!(call_count.load(Ordering::SeqCst), 0);
 
     let _ = futures::executor::block_on(remote_promise.promise);
-    assert_eq!(call_count.get(), 1);
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -936,12 +938,12 @@ fn capability_list() {
 
         let server1 = crate::impls::TestInterface::new();
         let call_count1 = server1.get_call_count();
-        assert_eq!(call_count1.get(), 0);
+        assert_eq!(call_count1.load(Ordering::SeqCst), 0);
         let client1: crate::test_capnp::test_interface::Client = capnp_rpc::new_client(server1);
 
         let server2 = crate::impls::TestInterface::new();
         let call_count2 = server2.get_call_count();
-        assert_eq!(call_count2.get(), 0);
+        assert_eq!(call_count2.load(Ordering::SeqCst), 0);
         let client2: crate::test_capnp::test_interface::Client = capnp_rpc::new_client(server2);
 
         let mut request = client.call_each_capability_request();
@@ -951,8 +953,8 @@ fn capability_list() {
             caps.set(1, client2.client.hook);
         }
         request.send().promise.await?;
-        assert_eq!(call_count1.get(), 1);
-        assert_eq!(call_count2.get(), 1);
+        assert_eq!(call_count1.load(Ordering::SeqCst), 1);
+        assert_eq!(call_count2.load(Ordering::SeqCst), 1);
         Ok(())
     })
 }
@@ -984,13 +986,13 @@ fn capability_server_set() {
     // Getting the local server using the correct set works.
     let own_server1_again = futures::executor::block_on(set1.get_local_server(&client1)).unwrap();
     assert_eq!(
-        own_server1_again.borrow().get_call_count().as_ptr(),
+        own_server1_again.read().unwrap().get_call_count().as_ptr(),
         own_server1_counter.as_ptr()
     );
 
     let own_server2_again = futures::executor::block_on(set2.get_local_server(&client2)).unwrap();
     assert_eq!(
-        own_server2_again.borrow().get_call_count().as_ptr(),
+        own_server2_again.read().unwrap().get_call_count().as_ptr(),
         own_server2_counter.as_ptr()
     );
 
@@ -1015,7 +1017,7 @@ fn capability_server_set() {
     let own_server1_again2 =
         futures::executor::block_on(set1.get_local_server(&client_promise)).unwrap();
     assert_eq!(
-        own_server1_again2.borrow().get_call_count().as_ptr(),
+        own_server1_again2.read().unwrap().get_call_count().as_ptr(),
         own_server1_counter.as_ptr()
     );
 
