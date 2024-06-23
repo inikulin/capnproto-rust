@@ -49,9 +49,11 @@ impl PipelineInner {
             Err(e) => Box::new(broken::Pipeline::new(e)),
         };
 
-        this.write().unwrap().redirect = Some(pipeline.add_ref());
+        let mut this_lock = this.write().unwrap();
 
-        for ((weak_client, ops), waiter) in this.write().unwrap().clients_to_resolve.drain() {
+        this_lock.redirect = Some(pipeline.add_ref());
+
+        for ((weak_client, ops), waiter) in this_lock.clients_to_resolve.drain() {
             if let Some(client) = weak_client.upgrade() {
                 let clienthook = pipeline.get_pipelined_cap_move(ops);
                 ClientInner::resolve(&client, Ok(clienthook));
@@ -59,7 +61,7 @@ impl PipelineInner {
             let _ = waiter.send(());
         }
 
-        this.write().unwrap().promise_to_drive = Promise::ok(()).shared();
+        this_lock.promise_to_drive = Promise::ok(()).shared();
     }
 }
 
@@ -116,15 +118,14 @@ impl Pipeline {
     where
         F: Future<Output = Result<(), Error>> + Unpin + Send + Sync + 'static,
     {
+        let mut inner_lock = self.inner.write().unwrap();
+
         let new = Promise::from_future(
-            futures::future::try_join(
-                self.inner.write().unwrap().promise_to_drive.clone(),
-                promise,
-            )
-            .map_ok(|_| ()),
+            futures::future::try_join(inner_lock.promise_to_drive.clone(), promise).map_ok(|_| ()),
         )
         .shared();
-        self.inner.write().unwrap().promise_to_drive = new;
+
+        inner_lock.promise_to_drive = new;
     }
 }
 
@@ -194,18 +195,23 @@ impl ClientInner {
             Ok(clienthook) => clienthook,
             Err(e) => broken::new_cap(e),
         };
-        state.write().unwrap().redirect = Some(client.add_ref());
-        for (args, waiter) in state.write().unwrap().call_forwarding_queue.drain() {
+
+        let mut state_lock = state.write().unwrap();
+
+        state_lock.redirect = Some(client.add_ref());
+
+        for (args, waiter) in state_lock.call_forwarding_queue.drain() {
             let (interface_id, method_id, params, results) = args;
             let result_promise = client.call(interface_id, method_id, params, results);
             let _ = waiter.send(result_promise);
         }
 
-        for ((), waiter) in state.write().unwrap().client_resolution_queue.drain() {
+        for ((), waiter) in state_lock.client_resolution_queue.drain() {
             let _ = waiter.send(client.add_ref());
         }
-        state.write().unwrap().promise_to_drive.take();
-        state.write().unwrap().pipeline_inner.take();
+
+        state_lock.promise_to_drive.take();
+        state_lock.pipeline_inner.take();
     }
 }
 

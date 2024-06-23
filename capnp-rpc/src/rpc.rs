@@ -680,11 +680,8 @@ impl<VatId> ConnectionState<VatId> {
         })
     }
 
-    fn send_unimplemented(
-        connection_state: &Arc<Self>,
-        message: &dyn crate::IncomingMessage,
-    ) -> capnp::Result<()> {
-        let mut out_message = connection_state.new_outgoing_message(50)?; // XXX size hint
+    fn send_unimplemented(&self, message: &dyn crate::IncomingMessage) -> capnp::Result<()> {
+        let mut out_message = self.new_outgoing_message(50)?; // XXX size hint
         {
             let mut root: message::Builder = out_message.get_body()?.get_as()?;
             root.set_unimplemented(message.get_body()?.get_as()?)?;
@@ -693,10 +690,7 @@ impl<VatId> ConnectionState<VatId> {
         Ok(())
     }
 
-    fn handle_unimplemented(
-        connection_state: &Arc<Self>,
-        message: message::Reader,
-    ) -> capnp::Result<()> {
+    fn handle_unimplemented(&self, message: message::Reader) -> capnp::Result<()> {
         match message.which()? {
             message::Resolve(resolve) => {
                 let resolve = resolve?;
@@ -704,10 +698,10 @@ impl<VatId> ConnectionState<VatId> {
                     resolve::Cap(c) => match c?.which()? {
                         cap_descriptor::None(()) => (),
                         cap_descriptor::SenderHosted(export_id) => {
-                            connection_state.release_export(export_id, 1)?;
+                            self.release_export(export_id, 1)?;
                         }
                         cap_descriptor::SenderPromise(export_id) => {
-                            connection_state.release_export(export_id, 1)?;
+                            self.release_export(export_id, 1)?;
                         }
                         cap_descriptor::ReceiverAnswer(_) | cap_descriptor::ReceiverHosted(_) => (),
                         cap_descriptor::ThirdPartyHosted(_) => {
@@ -779,12 +773,12 @@ impl<VatId> ConnectionState<VatId> {
         Ok(())
     }
 
-    fn handle_finish(connection_state: &Arc<Self>, finish: finish::Reader) -> capnp::Result<()> {
+    fn handle_finish(&self, finish: finish::Reader) -> capnp::Result<()> {
         let mut exports_to_release = Vec::new();
         let answer_id = finish.get_question_id();
 
         let mut erase = false;
-        let answers_slots = &mut connection_state.answers.write().unwrap().slots;
+        let answers_slots = &mut self.answers.write().unwrap().slots;
         match answers_slots.get_mut(&answer_id) {
             None => {
                 return Err(Error::failed(format!(
@@ -817,7 +811,7 @@ impl<VatId> ConnectionState<VatId> {
             answers_slots.remove(&answer_id);
         }
 
-        connection_state.release_exports(&exports_to_release)?;
+        self.release_exports(&exports_to_release)?;
         Ok(())
     }
 
@@ -1060,10 +1054,10 @@ impl<VatId> ConnectionState<VatId> {
                                     tmp.write().unwrap().reject(remote_exception_to_error(e?));
                                 }
                                 return_::Canceled(_) => {
-                                    Self::send_unimplemented(&connection_state, message.as_ref())?;
+                                    connection_state.send_unimplemented(message.as_ref())?;
                                 }
                                 return_::ResultsSentElsewhere(_) => {
-                                    Self::send_unimplemented(&connection_state, message.as_ref())?;
+                                    connection_state.send_unimplemented(message.as_ref())?;
                                 }
                                 return_::TakeFromOtherQuestion(id) => {
                                     if let Some(answer) =
@@ -1087,15 +1081,12 @@ impl<VatId> ConnectionState<VatId> {
                                 }
                                 return_::AcceptFromThirdParty(_) => {
                                     drop(questions);
-                                    Self::send_unimplemented(&connection_state, message.as_ref())?;
+                                    connection_state.send_unimplemented(message.as_ref())?;
                                 }
                             },
                             None => {
                                 if let return_::TakeFromOtherQuestion(_) = ret.which()? {
-                                    return Self::send_unimplemented(
-                                        &connection_state,
-                                        message.as_ref(),
-                                    );
+                                    return connection_state.send_unimplemented(message.as_ref());
                                 }
                                 // Looks like this question was canceled earlier, so `Finish`
                                 // was already sent, with `releaseResultCaps` set true so that
@@ -1112,7 +1103,7 @@ impl<VatId> ConnectionState<VatId> {
                     }
                 }
             }
-            Ok(message::Finish(finish)) => Self::handle_finish(&connection_state, finish?)?,
+            Ok(message::Finish(finish)) => connection_state.handle_finish(finish?)?,
             Ok(message::Resolve(resolve)) => {
                 let resolve = resolve?;
                 let replacement_or_error = match resolve.which()? {
@@ -1168,7 +1159,7 @@ impl<VatId> ConnectionState<VatId> {
                 | message::ObsoleteDelete(_),
             )
             | Err(::capnp::NotInSchema(_)) => {
-                Self::send_unimplemented(&connection_state, message.as_ref())?;
+                connection_state.send_unimplemented(message.as_ref())?;
             }
         }
         Ok(())
