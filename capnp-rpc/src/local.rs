@@ -254,27 +254,14 @@ impl RequestHook for Request {
     }
 }
 
-struct PipelineInner {
-    results: Box<dyn ResultsDoneHook>,
-}
-
+#[derive(Clone)]
 pub struct Pipeline {
-    inner: Arc<RwLock<PipelineInner>>,
+    results: Box<dyn ResultsDoneHook>,
 }
 
 impl Pipeline {
     pub fn new(results: Box<dyn ResultsDoneHook>) -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(PipelineInner { results })),
-        }
-    }
-}
-
-impl Clone for Pipeline {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
+        Self { results }
     }
 }
 
@@ -282,16 +269,9 @@ impl PipelineHook for Pipeline {
     fn add_ref(&self) -> Box<dyn PipelineHook> {
         Box::new(self.clone())
     }
+    
     fn get_pipelined_cap(&self, ops: &[PipelineOp]) -> Box<dyn ClientHook> {
-        match self
-            .inner
-            .read()
-            .unwrap()
-            .results
-            .get()
-            .unwrap()
-            .get_pipelined_cap(ops)
-        {
+        match self.results.get().unwrap().get_pipelined_cap(ops) {
             Ok(v) => v,
             Err(e) => Box::new(crate::broken::Client::new(e, true, 0)) as Box<dyn ClientHook>,
         }
