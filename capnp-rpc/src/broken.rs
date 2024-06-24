@@ -28,7 +28,7 @@ use capnp::Error;
 use capnp::capability::{Promise, RemotePromise};
 use capnp::traits::ImbueMut;
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 pub struct Pipeline {
     error: Error,
@@ -93,13 +93,13 @@ struct ClientInner {
 }
 
 pub struct Client {
-    inner: Rc<ClientInner>,
+    inner: Arc<ClientInner>,
 }
 
 impl Client {
     pub fn new(error: Error, resolved: bool, brand: usize) -> Self {
         Self {
-            inner: Rc::new(ClientInner {
+            inner: Arc::new(ClientInner {
                 error,
                 _resolved: resolved,
                 brand,

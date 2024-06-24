@@ -26,7 +26,7 @@ pub mod hello_world_capnp {
 pub mod client;
 pub mod server;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = ::std::env::args().collect();
     if args.len() >= 2 {

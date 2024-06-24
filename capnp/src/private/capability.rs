@@ -25,7 +25,7 @@ use crate::any_pointer;
 use crate::capability::{Params, Promise, RemotePromise, Request, Results};
 use crate::MessageSize;
 
-pub trait ResponseHook {
+pub trait ResponseHook: Send + Sync {
     fn get(&self) -> crate::Result<any_pointer::Reader<'_>>;
 }
 
@@ -42,7 +42,7 @@ pub trait RequestHook {
     )>;
 }
 
-pub trait ClientHook {
+pub trait ClientHook: Send + Sync {
     fn add_ref(&self) -> alloc::boxed::Box<dyn ClientHook>;
     fn new_call(
         &self,
@@ -90,7 +90,7 @@ impl Clone for alloc::boxed::Box<dyn ClientHook> {
     }
 }
 
-pub trait ResultsHook {
+pub trait ResultsHook: Send + Sync {
     fn get(&mut self) -> crate::Result<any_pointer::Builder<'_>>;
     fn allow_cancellation(&self);
     fn tail_call(
@@ -106,7 +106,7 @@ pub trait ResultsHook {
     );
 }
 
-pub trait ParamsHook {
+pub trait ParamsHook: Send + Sync {
     fn get(&self) -> crate::Result<crate::any_pointer::Reader<'_>>;
 }
 
@@ -132,7 +132,7 @@ pub fn internal_get_untyped_results<T>(typeful: Results<T>) -> Results<any_point
     }
 }
 
-pub trait PipelineHook {
+pub trait PipelineHook: Send + Sync {
     fn add_ref(&self) -> alloc::boxed::Box<dyn PipelineHook>;
     fn get_pipelined_cap(&self, ops: &[PipelineOp]) -> alloc::boxed::Box<dyn ClientHook>;
 

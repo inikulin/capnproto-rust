@@ -29,10 +29,9 @@ use capnp::{any_pointer, message};
 use futures::channel::oneshot;
 use futures::TryFutureExt;
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, RwLock};
 
-pub trait ResultsDoneHook {
+pub trait ResultsDoneHook: Send + Sync {
     fn add_ref(&self) -> Box<dyn ResultsDoneHook>;
     fn get(&self) -> ::capnp::Result<any_pointer::Reader>;
 }
@@ -148,7 +147,7 @@ struct ResultsDoneInner {
 }
 
 struct ResultsDone {
-    inner: Rc<ResultsDoneInner>,
+    inner: Arc<ResultsDoneInner>,
 }
 
 impl ResultsDone {
@@ -157,7 +156,7 @@ impl ResultsDone {
         cap_table: Vec<Option<Box<dyn ClientHook>>>,
     ) -> Self {
         Self {
-            inner: Rc::new(ResultsDoneInner { message, cap_table }),
+            inner: Arc::new(ResultsDoneInner { message, cap_table }),
         }
     }
 }
@@ -255,27 +254,14 @@ impl RequestHook for Request {
     }
 }
 
-struct PipelineInner {
-    results: Box<dyn ResultsDoneHook>,
-}
-
+#[derive(Clone)]
 pub struct Pipeline {
-    inner: Rc<RefCell<PipelineInner>>,
+    results: Box<dyn ResultsDoneHook>,
 }
 
 impl Pipeline {
     pub fn new(results: Box<dyn ResultsDoneHook>) -> Self {
-        Self {
-            inner: Rc::new(RefCell::new(PipelineInner { results })),
-        }
-    }
-}
-
-impl Clone for Pipeline {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
+        Self { results }
     }
 }
 
@@ -283,15 +269,9 @@ impl PipelineHook for Pipeline {
     fn add_ref(&self) -> Box<dyn PipelineHook> {
         Box::new(self.clone())
     }
+
     fn get_pipelined_cap(&self, ops: &[PipelineOp]) -> Box<dyn ClientHook> {
-        match self
-            .inner
-            .borrow_mut()
-            .results
-            .get()
-            .unwrap()
-            .get_pipelined_cap(ops)
-        {
+        match self.results.get().unwrap().get_pipelined_cap(ops) {
             Ok(v) => v,
             Err(e) => Box::new(crate::broken::Client::new(e, true, 0)) as Box<dyn ClientHook>,
         }
@@ -302,7 +282,7 @@ pub struct Client<S>
 where
     S: capability::Server,
 {
-    inner: Rc<RefCell<S>>,
+    inner: Arc<RwLock<S>>,
 }
 
 impl<S> Client<S>
@@ -311,11 +291,16 @@ where
 {
     pub fn new(server: S) -> Self {
         Self {
-            inner: Rc::new(RefCell::new(server)),
+            inner: Arc::new(RwLock::new(server)),
         }
     }
+}
 
-    pub fn from_rc(inner: Rc<RefCell<S>>) -> Self {
+impl<S> From<Arc<RwLock<S>>> for Client<S>
+where
+    S: capability::Server,
+{
+    fn from(inner: Arc<RwLock<S>>) -> Self {
         Self { inner }
     }
 }
@@ -370,7 +355,7 @@ where
             let f = {
                 // We put this borrow_mut() inside a block to avoid a potential
                 // double borrow during f.await
-                let server = &mut *inner.borrow_mut();
+                let server = &mut *inner.write().unwrap();
                 server.dispatch_call(
                     interface_id,
                     method_id,
@@ -383,7 +368,7 @@ where
     }
 
     fn get_ptr(&self) -> usize {
-        self.inner.as_ptr() as usize
+        Arc::as_ptr(&self.inner) as usize
     }
 
     fn get_brand(&self) -> usize {

@@ -2807,7 +2807,7 @@ fn generate_node(
 
             mod_interior.push(Branch(vec![
                 Line(
-                    fmt!(ctx,"impl <_S: Server{1} + 'static, {0}> {capnp}::capability::FromServer<_S> for Client{1} {2}  {{",
+                    fmt!(ctx,"impl <_S: Server{1} + Send + Sync + 'static, {0}> {capnp}::capability::FromServer<_S> for Client{1} {2}  {{",
                             params.params, bracketed_params, params.where_clause_with_static)),
                 indent(vec![
                     Line(format!("type Dispatch = ServerDispatch<_S, {}>;", params.params)),
@@ -2844,9 +2844,9 @@ fn generate_node(
             mod_interior.push(
                 Branch(vec![
                     (if is_generic {
-                        Line(fmt!(ctx,"impl <{}, _T: Server{}> {capnp}::capability::Server for ServerDispatch<_T,{}> {} {{", params.params, bracketed_params, params.params, params.where_clause))
+                        Line(fmt!(ctx,"impl <{}, _T: Send + Sync + Server{}> {capnp}::capability::Server for ServerDispatch<_T,{}> {} {{", params.params, bracketed_params, params.params, params.where_clause))
                     } else {
-                        Line(fmt!(ctx,"impl <_T: Server> {capnp}::capability::Server for ServerDispatch<_T> {{"))
+                        Line(fmt!(ctx,"impl <_T: Server + Send + Sync> {capnp}::capability::Server for ServerDispatch<_T> {{"))
                     }),
                     indent(Line(fmt!(ctx,"fn dispatch_call(&mut self, interface_id: u64, method_id: u16, params: {capnp}::capability::Params<{capnp}::any_pointer::Owned>, results: {capnp}::capability::Results<{capnp}::any_pointer::Owned>) -> {capnp}::capability::Promise<(), {capnp}::Error> {{"))),
                     indent(indent(line("match interface_id {"))),

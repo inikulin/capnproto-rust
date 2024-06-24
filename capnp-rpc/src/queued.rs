@@ -26,8 +26,7 @@ use capnp::Error;
 
 use futures::{Future, FutureExt, TryFutureExt};
 
-use std::cell::RefCell;
-use std::rc::{Rc, Weak};
+use std::sync::{Arc, RwLock, Weak};
 
 use crate::attach::Attach;
 use crate::sender_queue::SenderQueue;
@@ -39,20 +38,22 @@ pub struct PipelineInner {
 
     promise_to_drive: futures::future::Shared<Promise<(), Error>>,
 
-    clients_to_resolve: SenderQueue<(Weak<RefCell<ClientInner>>, Vec<PipelineOp>), ()>,
+    clients_to_resolve: SenderQueue<(Weak<RwLock<ClientInner>>, Vec<PipelineOp>), ()>,
 }
 
 impl PipelineInner {
-    fn resolve(this: &Rc<RefCell<Self>>, result: Result<Box<dyn PipelineHook>, Error>) {
-        assert!(this.borrow().redirect.is_none());
+    fn resolve(this: &Arc<RwLock<Self>>, result: Result<Box<dyn PipelineHook>, Error>) {
+        assert!(this.read().unwrap().redirect.is_none());
         let pipeline = match result {
             Ok(pipeline_hook) => pipeline_hook,
             Err(e) => Box::new(broken::Pipeline::new(e)),
         };
 
-        this.borrow_mut().redirect = Some(pipeline.add_ref());
+        let mut this_lock = this.write().unwrap();
 
-        for ((weak_client, ops), waiter) in this.borrow_mut().clients_to_resolve.drain() {
+        this_lock.redirect = Some(pipeline.add_ref());
+
+        for ((weak_client, ops), waiter) in this_lock.clients_to_resolve.drain() {
             if let Some(client) = weak_client.upgrade() {
                 let clienthook = pipeline.get_pipelined_cap_move(ops);
                 ClientInner::resolve(&client, Ok(clienthook));
@@ -60,12 +61,12 @@ impl PipelineInner {
             let _ = waiter.send(());
         }
 
-        this.borrow_mut().promise_to_drive = Promise::ok(()).shared();
+        this_lock.promise_to_drive = Promise::ok(()).shared();
     }
 }
 
 pub struct PipelineInnerSender {
-    inner: Option<Weak<RefCell<PipelineInner>>>,
+    inner: Option<Weak<RwLock<PipelineInner>>>,
 }
 
 impl Drop for PipelineInnerSender {
@@ -94,12 +95,12 @@ impl PipelineInnerSender {
 }
 
 pub struct Pipeline {
-    inner: Rc<RefCell<PipelineInner>>,
+    inner: Arc<RwLock<PipelineInner>>,
 }
 
 impl Pipeline {
     pub fn new() -> (PipelineInnerSender, Self) {
-        let inner = Rc::new(RefCell::new(PipelineInner {
+        let inner = Arc::new(RwLock::new(PipelineInner {
             redirect: None,
             promise_to_drive: Promise::ok(()).shared(),
             clients_to_resolve: SenderQueue::new(),
@@ -107,7 +108,7 @@ impl Pipeline {
 
         (
             PipelineInnerSender {
-                inner: Some(Rc::downgrade(&inner)),
+                inner: Some(Arc::downgrade(&inner)),
             },
             Self { inner },
         )
@@ -115,14 +116,16 @@ impl Pipeline {
 
     pub fn drive<F>(&mut self, promise: F)
     where
-        F: Future<Output = Result<(), Error>> + 'static + Unpin,
+        F: Future<Output = Result<(), Error>> + Unpin + Send + Sync + 'static,
     {
+        let mut inner_lock = self.inner.write().unwrap();
+
         let new = Promise::from_future(
-            futures::future::try_join(self.inner.borrow_mut().promise_to_drive.clone(), promise)
-                .map_ok(|_| ()),
+            futures::future::try_join(inner_lock.promise_to_drive.clone(), promise).map_ok(|_| ()),
         )
         .shared();
-        self.inner.borrow_mut().promise_to_drive = new;
+
+        inner_lock.promise_to_drive = new;
     }
 }
 
@@ -143,15 +146,16 @@ impl PipelineHook for Pipeline {
     }
 
     fn get_pipelined_cap_move(&self, ops: Vec<PipelineOp>) -> Box<dyn ClientHook> {
-        if let Some(p) = &self.inner.borrow().redirect {
+        if let Some(p) = &self.inner.read().unwrap().redirect {
             return p.get_pipelined_cap_move(ops);
         }
 
         let mut queued_client = Client::new(Some(self.inner.clone()));
-        queued_client.drive(self.inner.borrow().promise_to_drive.clone());
-        let weak_queued = Rc::downgrade(&queued_client.inner);
+        queued_client.drive(self.inner.read().unwrap().promise_to_drive.clone());
+        let weak_queued = Arc::downgrade(&queued_client.inner);
         self.inner
-            .borrow_mut()
+            .write()
+            .unwrap()
             .clients_to_resolve
             .push_detach((weak_queued, ops));
 
@@ -165,7 +169,7 @@ pub struct ClientInner {
 
     // The queued::PipelineInner that this client is derived from, if any. We need to hold on
     // to a reference to it so that it doesn't get canceled before the client is resolved.
-    pipeline_inner: Option<Rc<RefCell<PipelineInner>>>,
+    pipeline_inner: Option<Arc<RwLock<PipelineInner>>>,
 
     promise_to_drive: Option<futures::future::Shared<Promise<(), Error>>>,
 
@@ -185,34 +189,39 @@ pub struct ClientInner {
 }
 
 impl ClientInner {
-    pub fn resolve(state: &Rc<RefCell<Self>>, result: Result<Box<dyn ClientHook>, Error>) {
-        assert!(state.borrow().redirect.is_none());
+    pub fn resolve(state: &Arc<RwLock<Self>>, result: Result<Box<dyn ClientHook>, Error>) {
+        assert!(state.read().unwrap().redirect.is_none());
         let client = match result {
             Ok(clienthook) => clienthook,
             Err(e) => broken::new_cap(e),
         };
-        state.borrow_mut().redirect = Some(client.add_ref());
-        for (args, waiter) in state.borrow_mut().call_forwarding_queue.drain() {
+
+        let mut state_lock = state.write().unwrap();
+
+        state_lock.redirect = Some(client.add_ref());
+
+        for (args, waiter) in state_lock.call_forwarding_queue.drain() {
             let (interface_id, method_id, params, results) = args;
             let result_promise = client.call(interface_id, method_id, params, results);
             let _ = waiter.send(result_promise);
         }
 
-        for ((), waiter) in state.borrow_mut().client_resolution_queue.drain() {
+        for ((), waiter) in state_lock.client_resolution_queue.drain() {
             let _ = waiter.send(client.add_ref());
         }
-        state.borrow_mut().promise_to_drive.take();
-        state.borrow_mut().pipeline_inner.take();
+
+        state_lock.promise_to_drive.take();
+        state_lock.pipeline_inner.take();
     }
 }
 
 pub struct Client {
-    pub inner: Rc<RefCell<ClientInner>>,
+    pub inner: Arc<RwLock<ClientInner>>,
 }
 
 impl Client {
-    pub fn new(pipeline_inner: Option<Rc<RefCell<PipelineInner>>>) -> Self {
-        let inner = Rc::new(RefCell::new(ClientInner {
+    pub fn new(pipeline_inner: Option<Arc<RwLock<PipelineInner>>>) -> Self {
+        let inner = Arc::new(RwLock::new(ClientInner {
             promise_to_drive: None,
             pipeline_inner,
             redirect: None,
@@ -224,10 +233,10 @@ impl Client {
 
     pub fn drive<F>(&mut self, promise: F)
     where
-        F: Future<Output = Result<(), Error>> + 'static + Unpin,
+        F: Future<Output = Result<(), Error>> + Unpin + Send + Sync + 'static,
     {
-        assert!(self.inner.borrow().promise_to_drive.is_none());
-        self.inner.borrow_mut().promise_to_drive = Some(Promise::from_future(promise).shared());
+        assert!(self.inner.read().unwrap().promise_to_drive.is_none());
+        self.inner.write().unwrap().promise_to_drive = Some(Promise::from_future(promise).shared());
     }
 }
 
@@ -258,20 +267,21 @@ impl ClientHook for Client {
         params: Box<dyn ParamsHook>,
         results: Box<dyn ResultsHook>,
     ) -> Promise<(), Error> {
-        if let Some(client) = &self.inner.borrow().redirect {
+        if let Some(client) = &self.inner.read().unwrap().redirect {
             return client.call(interface_id, method_id, params, results);
         }
 
         let inner_clone = self.inner.clone();
         let promise = self
             .inner
-            .borrow_mut()
+            .write()
+            .unwrap()
             .call_forwarding_queue
             .push((interface_id, method_id, params, results))
             .attach(inner_clone)
             .and_then(|x| x);
 
-        match self.inner.borrow().promise_to_drive {
+        match self.inner.read().unwrap().promise_to_drive {
             Some(ref p) => {
                 Promise::from_future(futures::future::try_join(p.clone(), promise).map_ok(|v| v.1))
             }
@@ -280,7 +290,7 @@ impl ClientHook for Client {
     }
 
     fn get_ptr(&self) -> usize {
-        (&*self.inner.borrow()) as *const _ as usize
+        (&*self.inner.read().unwrap()) as *const _ as usize
     }
 
     fn get_brand(&self) -> usize {
@@ -288,19 +298,19 @@ impl ClientHook for Client {
     }
 
     fn get_resolved(&self) -> Option<Box<dyn ClientHook>> {
-        match &self.inner.borrow().redirect {
+        match &self.inner.read().unwrap().redirect {
             Some(inner) => Some(inner.clone()),
             None => None,
         }
     }
 
     fn when_more_resolved(&self) -> Option<Promise<Box<dyn ClientHook>, Error>> {
-        if let Some(client) = &self.inner.borrow().redirect {
+        if let Some(client) = &self.inner.read().unwrap().redirect {
             return Some(Promise::ok(client.add_ref()));
         }
 
-        let promise = self.inner.borrow_mut().client_resolution_queue.push(());
-        match &self.inner.borrow().promise_to_drive {
+        let promise = self.inner.write().unwrap().client_resolution_queue.push(());
+        match &self.inner.read().unwrap().promise_to_drive {
             Some(p) => Some(Promise::from_future(
                 futures::future::try_join(p.clone(), promise).map_ok(|v| v.1),
             )),
