@@ -53,6 +53,14 @@ pub type AnswerId = QuestionId;
 pub type ExportId = u32;
 pub type ImportId = ExportId;
 
+struct TaskCancelToken(Option<oneshot::Sender<()>>);
+
+impl Drop for TaskCancelToken {
+    fn drop(&mut self) {
+        let _ = self.0.take().unwrap().send(());
+    }
+}
+
 pub struct ImportTable<T> {
     slots: HashMap<u32, T>,
 }
@@ -258,7 +266,7 @@ where
     redirected_results: Option<Promise<Response<VatId>, Error>>,
 
     received_finish: Arc<AtomicBool>,
-    call_completion_promise: Option<Promise<(), Error>>,
+    call_completion_cancel_token: Option<TaskCancelToken>,
 
     // List of exports that were sent in the results.  If the finish has `releaseResultCaps` these
     // will need to be released.
@@ -273,7 +281,7 @@ impl<VatId> Answer<VatId> {
             pipeline: None,
             redirected_results: None,
             received_finish: Default::default(),
-            call_completion_promise: None,
+            call_completion_cancel_token: None,
             result_exports: Vec::new(),
         }
     }
@@ -285,7 +293,7 @@ pub struct Export {
 
     // If this export is a promise (not a settled capability), the `resolve_op` represents the
     // ongoing operation to wait for that promise to resolve and then send a `Resolve` message.
-    resolve_op: Promise<(), Error>,
+    resolve_op_cancel_token: Option<TaskCancelToken>,
 }
 
 impl Export {
@@ -293,7 +301,7 @@ impl Export {
         Self {
             refcount: 1,
             client_hook,
-            resolve_op: Promise::err(Error::failed("no resolve op".to_string())),
+            resolve_op_cancel_token: None,
         }
     }
 }
@@ -503,11 +511,11 @@ impl<VatId> ConnectionState<VatId> {
             if let Some(exp) = self.exports.write().unwrap().slots[idx].take() {
                 let Export {
                     client_hook,
-                    resolve_op,
+                    resolve_op_cancel_token,
                     ..
                 } = exp;
                 clients_to_release.push(client_hook);
-                resolve_ops_to_release.push(resolve_op);
+                resolve_ops_to_release.push(resolve_op_cancel_token);
             }
         }
         *self.exports.write().unwrap() = ExportTable::new();
@@ -580,25 +588,22 @@ impl<VatId> ConnectionState<VatId> {
         }
     }
 
-    // Transform a future into a promise that gets executed even if it is never polled.
-    // Dropping the returned promise cancels the computation.
-    fn eagerly_evaluate<T, F>(&self, task: F) -> Promise<T, Error>
+    fn add_cancellable_task<F>(&self, task: F) -> TaskCancelToken
     where
-        F: Future<Output = Result<T, Error>> + Send + Sync + Unpin + 'static,
-        T: Send + Sync + 'static,
+        F: Future<Output = Result<(), Error>> + Send + Sync + 'static,
     {
-        let (tx, rx) = oneshot::channel::<Result<T, Error>>();
-        let (tx2, rx2) = oneshot::channel::<()>();
-        let f1 = Box::pin(task.map(move |r| {
-            let _ = tx.send(r);
-        })) as Pin<Box<dyn Future<Output = ()> + Send + Sync + Unpin>>;
-        let f2 = Box::pin(rx2.map(drop)) as Pin<Box<dyn Future<Output = ()> + Send + Sync + Unpin>>;
+        let (cancel_tx, mut cancel_rx) = oneshot::channel();
 
-        self.add_task(future::select(f1, f2).map(|_| Ok(())));
-        Promise::from_future(rx.map_err(crate::canceled_to_error).map(|r| {
-            drop(tx2);
-            r?
-        }))
+        self.add_task(async move {
+            let mut task = std::pin::pin!(task.fuse());
+
+            futures::select_biased! {
+                _ = cancel_rx => Ok(()),
+                _ = task => Ok(())
+            }
+        });
+
+        TaskCancelToken(Some(cancel_tx))
     }
 
     fn add_task<F>(&self, task: F)
@@ -799,7 +804,7 @@ impl<VatId> ConnectionState<VatId> {
 
                 // If the pipeline has not been cloned, the following two lines cancel the call.
                 answer.pipeline.take();
-                answer.call_completion_promise.take();
+                answer.call_completion_cancel_token.take();
 
                 if answer.return_has_been_sent {
                     erase = true;
@@ -1014,8 +1019,8 @@ impl<VatId> ConnectionState<VatId> {
                                 answer.redirected_results = redirected_results_done_promise;
                                 // More to do here?
                             } else {
-                                answer.call_completion_promise =
-                                    Some(connection_state.eagerly_evaluate(fork));
+                                answer.call_completion_cancel_token =
+                                    Some(connection_state.add_cancellable_task(fork));
                             }
                         }
                         None => unreachable!(),
@@ -1313,9 +1318,9 @@ impl<VatId> ConnectionState<VatId> {
         state: &Arc<Self>,
         export_id: ExportId,
         promise: Promise<Box<dyn ClientHook>, Error>,
-    ) -> Promise<(), Error> {
+    ) -> TaskCancelToken {
         let weak_connection_state = Arc::downgrade(state);
-        state.eagerly_evaluate(promise.map(move |resolution_result| {
+        state.add_cancellable_task(promise.map(move |resolution_result| {
             let connection_state = weak_connection_state
                 .upgrade()
                 .expect("dangling connection state?");
@@ -1424,8 +1429,8 @@ impl<VatId> ConnectionState<VatId> {
                     Some(wrapped) => {
                         // This is a promise.  Arrange for the `Resolve` message to be sent later.
                         if let Some(exp) = state.exports.write().unwrap().find(export_id) {
-                            exp.resolve_op =
-                                Self::resolve_exported_promise(state, export_id, wrapped);
+                            exp.resolve_op_cancel_token =
+                                Some(Self::resolve_exported_promise(state, export_id, wrapped));
                         }
                         descriptor.set_sender_promise(export_id);
                     }
@@ -1976,8 +1981,7 @@ where
     redirect_later: Option<RwLock<futures::future::Shared<Promise<Response<VatId>, Error>>>>,
     connection_state: Arc<ConnectionState<VatId>>,
 
-    #[allow(dead_code)]
-    resolve_self_promise: Promise<(), Error>,
+    _resolve_self_cancel_token: Option<TaskCancelToken>,
 
     promise_clients_to_resolve: RwLock<
         crate::sender_queue::SenderQueue<(Weak<RwLock<PromiseClient<VatId>>>, Vec<PipelineOp>), ()>,
@@ -2038,15 +2042,15 @@ impl<VatId> Pipeline<VatId> {
             variant: PipelineVariant::Waiting(question_ref),
             connection_state: connection_state.clone(),
             redirect_later: None,
-            resolve_self_promise: Promise::from_future(future::pending()),
+            _resolve_self_cancel_token: None,
             promise_clients_to_resolve: RwLock::new(crate::sender_queue::SenderQueue::new()),
             resolution_waiters: crate::sender_queue::SenderQueue::new(),
         }));
         if let Some(redirect_later_promise) = redirect_later {
             let fork = redirect_later_promise.shared();
             let this = Arc::downgrade(&state);
-            let resolve_self_promise =
-                connection_state.eagerly_evaluate(fork.clone().then(move |response| {
+            let resolve_self_cancel_token =
+                connection_state.add_cancellable_task(fork.clone().then(move |response| {
                     let Some(state) = this.upgrade() else {
                         return Promise::err(Error::failed("dangling reference to this".into()));
                     };
@@ -2054,7 +2058,7 @@ impl<VatId> Pipeline<VatId> {
                     Promise::ok(())
                 }));
 
-            state.write().unwrap().resolve_self_promise = resolve_self_promise;
+            state.write().unwrap()._resolve_self_cancel_token = Some(resolve_self_cancel_token);
             state.write().unwrap().redirect_later = Some(RwLock::new(fork));
         }
         Self { state }
@@ -2072,7 +2076,7 @@ impl<VatId> Pipeline<VatId> {
             variant: PipelineVariant::Waiting(question_ref),
             connection_state,
             redirect_later: None,
-            resolve_self_promise: Promise::from_future(future::pending()),
+            _resolve_self_cancel_token: None,
             promise_clients_to_resolve: RwLock::new(crate::sender_queue::SenderQueue::new()),
             resolution_waiters: crate::sender_queue::SenderQueue::new(),
         }));
